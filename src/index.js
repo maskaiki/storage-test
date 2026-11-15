@@ -31,7 +31,7 @@ function toFolderTag(name) {
   return '#Folder_' + name.trim().replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
 }
 
-// Load or initialize catalog database
+// Load or initialize catalog database (Local caching)
 let catalog = {
   activeFolder: 'Umum',
   folders: {
@@ -82,30 +82,158 @@ function saveConfig() {
   } catch (e) {}
 }
 
+// Telegraf Bot Initialization
+const token = process.env.TELEGRAM_BOT_TOKEN;
+const channelId = process.env.STORAGE_CHANNEL_ID;
+
+if (!token || !token.includes(':')) {
+  console.error('\n⚠️ TELEGRAM_BOT_TOKEN belum diisi di file .env!');
+  console.error('Silakan isi TELEGRAM_BOT_TOKEN dan STORAGE_CHANNEL_ID di file .env terlebih dahulu.\n');
+  process.exit(1);
+}
+
+const bot = new Telegraf(token);
+
+// ============================================================================
+// SERVERLESS PERSISTENCE VIA TELEGRAM CLOUD (Channel Pinned Message & Description)
+// Vercel serverless has ephemeral /tmp and memory, so Telegram channel is our DB!
+// ============================================================================
+
+// 1. Get active folder directly from Telegram channel pinned message
+async function getActiveFolder() {
+  if (!channelId) return catalog.activeFolder || 'Umum';
+  try {
+    const chat = await bot.telegram.getChat(channelId);
+    if (chat.pinned_message && chat.pinned_message.text) {
+      const match = chat.pinned_message.text.match(/FOLDER(?:\s*AKTIF)?:\s*\[\s*([^\]]+)\s*\]/i);
+      if (match && match[1]) {
+        const active = match[1].trim();
+        catalog.activeFolder = active;
+        return active;
+      }
+    }
+  } catch (err) {
+    console.warn('[GetActiveFolder Warning]:', err.message);
+  }
+  return catalog.activeFolder || 'Umum';
+}
+
+// 2. Get list of folders from Telegram channel description & pinned message
+async function getFoldersList() {
+  const folders = new Set(['Umum']);
+  if (catalog.folders) {
+    Object.keys(catalog.folders).forEach(f => folders.add(f));
+  }
+
+  if (channelId) {
+    try {
+      const chat = await bot.telegram.getChat(channelId);
+      if (chat.description) {
+        const match = chat.description.match(/Folders:\s*([^\n\r]+)/i);
+        if (match && match[1]) {
+          match[1].split(',').map(s => s.trim()).filter(Boolean).forEach(f => folders.add(f));
+        }
+      }
+      if (chat.pinned_message && chat.pinned_message.text) {
+        const pMatch = chat.pinned_message.text.match(/FOLDER(?:\s*AKTIF)?:\s*\[\s*([^\]]+)\s*\]/i);
+        if (pMatch && pMatch[1]) folders.add(pMatch[1].trim());
+      }
+    } catch (err) {
+      console.warn('[GetFoldersList Warning]:', err.message);
+    }
+  }
+  return Array.from(folders);
+}
+
+// 3. Save new folder to channel description (acts as persistent list)
+async function saveFolderToChannel(newFolder) {
+  if (!channelId) return;
+  try {
+    const currentList = await getFoldersList();
+    if (!currentList.some(f => f.toLowerCase() === newFolder.toLowerCase())) {
+      currentList.push(newFolder);
+    }
+    const desc = `Vault Storage Bot | Folders: ${currentList.join(', ')}`.substring(0, 255);
+    await bot.telegram.setChatDescription(channelId, desc);
+  } catch (err) {
+    console.warn('[SaveToChannelDesc Warning]:', err.message);
+  }
+}
+
+// 4. Send and pin folder divider in channel
+async function sendAndPinDivider(folderName, isNew = false) {
+  if (!channelId) return;
+  try {
+    const tag = toFolderTag(folderName);
+    const dateStr = new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
+    const text = isNew ?
+`━━━━━━━━━━━━━━━━━━━━━━━━━━
+📁 <b>FOLDER: [ ${folderName} ]</b>
+🏷️ <b>Tag Folder:</b> <code>${tag}</code>
+📅 <b>Dibuat:</b> ${dateStr}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+<i>Semua file berikutnya di bawah ini tersimpan rapi di dalam folder ini.</i>` :
+`━━━━━━━━━━━━━━━━━━━━━━━━━━
+📁 <b>FOLDER AKTIF: [ ${folderName} ]</b>
+🏷️ <b>Tag Folder:</b> <code>${tag}</code>
+📅 <b>Diaktifkan:</b> ${dateStr}
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 <i>Target upload aktif dialihkan ke folder ini.</i>`;
+
+    const sent = await bot.telegram.sendMessage(channelId, text, { parse_mode: 'HTML' });
+    try {
+      await bot.telegram.pinChatMessage(channelId, sent.message_id, { disable_notification: true });
+    } catch (e) {
+      console.warn('[Pin Warning]:', e.message);
+    }
+
+    if (!catalog.folders[folderName]) {
+      catalog.folders[folderName] = {
+        name: folderName,
+        tag: tag,
+        createdAt: new Date().toISOString(),
+        fileCount: 0,
+        totalBytes: 0,
+        dividerSent: true
+      };
+    } else {
+      catalog.folders[folderName].dividerSent = true;
+    }
+    catalog.activeFolder = folderName;
+    saveCatalog();
+  } catch (err) {
+    console.warn('[Divider Warning]:', err.message);
+  }
+}
+
 // Express App (Healthcheck & Webhook for Vercel/Render)
 const app = express();
 app.use(express.json());
 
-app.get('/', (req, res) => {
+app.get('/', async (req, res) => {
+  const active = await getActiveFolder();
+  const folders = await getFoldersList();
   res.send(`
     <html>
       <head><title>Vault Bot Server</title></head>
       <body style="font-family:sans-serif; background:#0f172a; color:#f8fafc; padding:2rem; text-align:center;">
         <h1>🗄️ Telegram Vault Storage Bot</h1>
-        <p style="color:#10b981;">✅ Bot is running and healthy!</p>
-        <p>Total Files Stored: <b>${catalog.files.length}</b></p>
-        <p>Total Storage: <b>${formatBytes(catalog.files.reduce((acc, f) => acc + (f.sizeBytes || 0), 0))}</b></p>
+        <p style="color:#10b981;">✅ Bot is running and healthy on Vercel!</p>
+        <p>Active Target Folder: <b>${active}</b></p>
+        <p>Known Folders: <b>${folders.join(', ')}</b></p>
       </body>
     </html>
   `);
 });
 
-app.get('/health', (req, res) => {
+app.get('/health', async (req, res) => {
+  const active = await getActiveFolder();
+  const folders = await getFoldersList();
   res.json({
     status: 'ok',
     uptime: process.uptime(),
-    totalFiles: catalog.files.length,
-    activeFolder: catalog.activeFolder,
+    activeFolder: active,
+    folders: folders,
     timestamp: new Date().toISOString()
   });
 });
@@ -134,87 +262,57 @@ app.get('/api/setup-webhook', async (req, res) => {
   }
 });
 
-// Telegraf Bot Initialization
-const token = process.env.TELEGRAM_BOT_TOKEN;
-const channelId = process.env.STORAGE_CHANNEL_ID;
-
-if (!token || !token.includes(':')) {
-  console.error('\n⚠️ TELEGRAM_BOT_TOKEN belum diisi di file .env!');
-  console.error('Silakan isi TELEGRAM_BOT_TOKEN dan STORAGE_CHANNEL_ID di file .env terlebih dahulu.\n');
-  process.exit(1);
-}
-
-const bot = new Telegraf(token);
-
 // Middleware: Owner Authentication & Auto-Pairing
 bot.use(async (ctx, next) => {
   const fromId = ctx.from ? String(ctx.from.id) : null;
   if (!fromId) return next();
 
-  // If ownerChatId is not set, pair with the first user who contacts the bot!
+  if (ctx.chat?.type === 'channel') return next();
+
   if (!runtimeConfig.ownerChatId) {
     runtimeConfig.ownerChatId = fromId;
     saveConfig();
-    console.log(`[Auto-Pair] Bot otomatis dikunci untuk pemilik dengan Telegram ID: ${fromId} (${ctx.from.first_name || ''})`);
+    console.log(`[Auto-Pair] Bot otomatis dikunci untuk Telegram ID: ${fromId} (${ctx.from.first_name || ''})`);
   }
 
-  // Allow only the owner to access the bot
-  if (fromId !== runtimeConfig.ownerChatId) {
-    if (ctx.chat?.type === 'private') {
-      await ctx.reply(
-        '⛔ <b>Akses Ditolak</b>\n\nBot ini adalah brankas penyimpanan pribadi yang dilindungi. Hanya pemilik bot yang dapat menggunakan layanan ini.',
-        { parse_mode: 'HTML' }
-      );
-    }
-    return;
+  if (fromId === runtimeConfig.ownerChatId) {
+    return next();
   }
 
-  return next();
-});
-
-// Helper: Ensure folder divider in channel
-async function ensureFolderDivider(folderName) {
-  if (!channelId) return;
-  const f = catalog.folders[folderName];
-  if (!f || f.dividerSent) return;
-
-  try {
-    const dividerText = 
-`━━━━━━━━━━━━━━━━━━━━━━━━━━
-📁 <b>FOLDER: [ ${f.name} ]</b>
-🏷️ <b>Tag Folder:</b> <code>${f.tag}</code>
-📅 <b>Dibuat:</b> ${new Date(f.createdAt).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-<i>Semua file berikutnya di bawah ini tersimpan rapi di dalam folder ini.</i>`;
-
-    const sent = await bot.telegram.sendMessage(channelId, dividerText, { parse_mode: 'HTML' });
+  if (channelId) {
     try {
-      await bot.telegram.pinChatMessage(channelId, sent.message_id, { disable_notification: true });
+      const member = await bot.telegram.getChatMember(channelId, fromId);
+      if (['creator', 'administrator', 'member'].includes(member.status)) {
+        return next();
+      }
     } catch (e) {}
-
-    f.dividerSent = true;
-    saveCatalog();
-  } catch (err) {
-    console.warn('[Channel Divider Warning]:', err.message);
   }
-}
+
+  if (ctx.chat?.type === 'private') {
+    await ctx.reply(
+      '⛔ <b>Akses Ditolak</b>\n\nBot ini adalah brankas penyimpanan pribadi yang dilindungi. Hanya pemilik bot dan anggota channel yang dapat menggunakan layanan ini.',
+      { parse_mode: 'HTML' }
+    );
+  }
+  return;
+});
 
 // 1. /start Command
 bot.command('start', async (ctx) => {
   const name = ctx.from.first_name || 'Teman';
-  const totalFiles = catalog.files.length;
-  const totalBytes = catalog.files.reduce((a, b) => a + (b.sizeBytes || 0), 0);
+  const activeFolder = await getActiveFolder();
+  const foldersList = await getFoldersList();
 
   const welcomeText = 
 `👋 <b>Halo, ${name}! Selamat datang di Brankas Pribadi Telegram kamu!</b>
 
 🗄️ <b>Status Brankas:</b>
-• <b>Target Upload Aktif:</b> 📂 <code>${catalog.activeFolder}</code>
-• <b>Total File Tersimpan:</b> ${totalFiles} file (${formatBytes(totalBytes)})
+• <b>Target Upload Aktif:</b> 📂 <code>${activeFolder}</code>
+• <b>Total Folder:</b> ${foldersList.length} folder
 • <b>Kapasitas:</b> ♾️ Unlimited Telegram Cloud
 
 <b>Cara Penggunaan:</b>
-1. Kirim <b>Foto, Video, Lagu, atau Dokumen</b> apa saja ke chat ini, file langsung otomatis masuk ke Channel Private kamu!
+1. Kirim <b>Foto, Video, Lagu, atau Dokumen</b> apa saja ke chat ini, file langsung otomatis masuk ke Channel Private kamu di folder <code>${activeFolder}</code>!
 2. Gunakan tombol di bawah atau ketik <code>/mkdir &lt;nama&gt;</code> untuk membuat folder baru.`;
 
   const keyboard = Markup.inlineKeyboard([
@@ -232,21 +330,21 @@ bot.command('folders', async (ctx) => {
 });
 
 async function showFoldersMenu(ctx) {
-  const foldersList = Object.values(catalog.folders);
+  const foldersList = await getFoldersList();
+  const currentActive = await getActiveFolder();
   let text = `📂 <b>DAFTAR FOLDER PENYIMPANAN</b>\n\n`;
 
-  foldersList.forEach((fd, i) => {
-    const isActive = fd.name.toLowerCase() === catalog.activeFolder.toLowerCase();
-    text += `${i + 1}. ${isActive ? '🟢 <b>[AKTIF]</b> ' : '📁 '}<b>${fd.name}</b>\n`;
-    text += `   • Isi: ${fd.fileCount || 0} file (${formatBytes(fd.totalBytes || 0)})\n`;
-    text += `   • Tag: <code>${fd.tag}</code>\n\n`;
+  foldersList.forEach((folderName, i) => {
+    const isActive = folderName.toLowerCase() === currentActive.toLowerCase();
+    text += `${i + 1}. ${isActive ? '🟢 <b>[AKTIF]</b> ' : '📁 '}<b>${folderName}</b>\n`;
+    text += `   • Tag: <code>${toFolderTag(folderName)}</code>\n\n`;
   });
 
   text += `<i>Klik tombol di bawah untuk memilih folder tujuan upload baru:</i>`;
 
-  const buttons = foldersList.map(fd => {
-    const isActive = fd.name.toLowerCase() === catalog.activeFolder.toLowerCase();
-    return [Markup.button.callback(`${isActive ? '🎯 ' : '📁 '}${fd.name}`, `set_active_${encodeURIComponent(fd.name)}`)];
+  const buttons = foldersList.map(folderName => {
+    const isActive = folderName.toLowerCase() === currentActive.toLowerCase();
+    return [Markup.button.callback(`${isActive ? '🎯 ' : '📁 '}${folderName}`, `set_active_${encodeURIComponent(folderName)}`)];
   });
 
   buttons.push([Markup.button.callback('➕ Buat Folder Baru', 'prompt_mkdir')]);
@@ -254,7 +352,11 @@ async function showFoldersMenu(ctx) {
   const keyboard = Markup.inlineKeyboard(buttons);
 
   if (ctx.callbackQuery) {
-    await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+    try {
+      await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+    } catch (e) {
+      await ctx.reply(text, { parse_mode: 'HTML', ...keyboard });
+    }
   } else {
     await ctx.reply(text, { parse_mode: 'HTML', ...keyboard });
   }
@@ -269,24 +371,8 @@ bot.command('mkdir', async (ctx) => {
     return ctx.reply('⚠️ Harap masukkan nama folder!\nContoh: <code>/mkdir Liburan Bali</code>', { parse_mode: 'HTML' });
   }
 
-  if (catalog.folders[folderName]) {
-    catalog.activeFolder = folderName;
-    saveCatalog();
-    return ctx.reply(`📂 Folder <b>"${folderName}"</b> sudah ada.\n🎯 Folder aktif sekarang diubah ke: <b>${folderName}</b>`, { parse_mode: 'HTML' });
-  }
-
-  catalog.folders[folderName] = {
-    name: folderName,
-    tag: toFolderTag(folderName),
-    createdAt: new Date().toISOString(),
-    fileCount: 0,
-    totalBytes: 0,
-    dividerSent: false
-  };
-  catalog.activeFolder = folderName;
-  saveCatalog();
-
-  await ensureFolderDivider(folderName);
+  await saveFolderToChannel(folderName);
+  await sendAndPinDivider(folderName, true);
 
   await ctx.reply(
     `✅ <b>Folder Baru Berhasil Dibuat!</b>\n\n` +
@@ -307,15 +393,14 @@ bot.command('use', async (ctx) => {
     return ctx.reply('⚠️ Harap masukkan nama folder!\nContoh: <code>/use Umum</code>', { parse_mode: 'HTML' });
   }
 
-  const found = Object.keys(catalog.folders).find(k => k.toLowerCase() === folderName.toLowerCase());
-  if (!found) {
-    return ctx.reply(`❌ Folder "${folderName}" tidak ditemukan. Ketik <code>/folders</code> untuk melihat daftar folder.`, { parse_mode: 'HTML' });
-  }
+  const foldersList = await getFoldersList();
+  const found = foldersList.find(f => f.toLowerCase() === folderName.toLowerCase());
+  const targetFolder = found || folderName;
 
-  catalog.activeFolder = catalog.folders[found].name;
-  saveCatalog();
+  await saveFolderToChannel(targetFolder);
+  await sendAndPinDivider(targetFolder, false);
 
-  await ctx.reply(`🎯 <b>Target Upload Diubah!</b>\nSemua file berikutnya akan masuk ke: <b>${catalog.activeFolder}</b>`, { parse_mode: 'HTML' });
+  await ctx.reply(`🎯 <b>Target Upload Diubah!</b>\nSemua file berikutnya akan masuk ke: <b>${targetFolder}</b>`, { parse_mode: 'HTML' });
 });
 
 // Actions / Callbacks
@@ -339,8 +424,8 @@ bot.action('menu_help', async (ctx) => {
   await ctx.reply(
     `📖 <b>PANDUAN PERINTAH BOT</b>\n\n` +
     `• <b>Kirim Foto/Video Langsung:</b> File otomatis masuk ke folder aktif saat ini.\n` +
-    `• <code>/folders</code> : Lihat semua folder dan statistik file.\n` +
-    `• <code>/mkdir &lt;nama&gt;</code> : Buat folder baru.\n` +
+    `• <code>/folders</code> : Lihat semua folder dan pilih target upload.\n` +
+    `• <code>/mkdir &lt;nama&gt;</code> : Buat folder baru & langsung aktif.\n` +
     `• <code>/use &lt;nama&gt;</code> : Ganti tujuan folder aktif.\n` +
     `• <code>/start</code> : Menu utama bot.`,
     { parse_mode: 'HTML' }
@@ -349,14 +434,9 @@ bot.action('menu_help', async (ctx) => {
 
 bot.action(/^set_active_(.+)$/, async (ctx) => {
   const folderName = decodeURIComponent(ctx.match[1]);
-  if (catalog.folders[folderName]) {
-    catalog.activeFolder = folderName;
-    saveCatalog();
-    await ctx.answerCbQuery(`Folder aktif: ${folderName}`);
-    await showFoldersMenu(ctx);
-  } else {
-    await ctx.answerCbQuery('Folder tidak ditemukan!');
-  }
+  await sendAndPinDivider(folderName, false);
+  await ctx.answerCbQuery(`Folder aktif: ${folderName}`);
+  await showFoldersMenu(ctx);
 });
 
 // ==========================================
@@ -368,19 +448,9 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
     return ctx.reply('⚠️ STORAGE_CHANNEL_ID belum dikonfigurasi di file .env.');
   }
 
-  const folderName = catalog.activeFolder || 'Umum';
-  if (!catalog.folders[folderName]) {
-    catalog.folders[folderName] = {
-      name: folderName,
-      tag: toFolderTag(folderName),
-      createdAt: new Date().toISOString(),
-      fileCount: 0,
-      totalBytes: 0,
-      dividerSent: false
-    };
-  }
-
-  await ensureFolderDivider(folderName);
+  // Read active folder directly from Telegram channel pinned divider!
+  const folderName = await getActiveFolder();
+  const folderTag = toFolderTag(folderName);
 
   let fileId = '';
   let fileName = 'File';
@@ -419,7 +489,6 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
     sizeBytes = ctx.message.voice.file_size || 0;
   }
 
-  const folderTag = toFolderTag(folderName);
   const caption = 
 `📁 <b>FOLDER: [ ${folderName} ]</b>
 🏷️ <b>Tag Folder:</b> ${folderTag}
@@ -436,7 +505,7 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
       parse_mode: 'HTML'
     });
 
-    // Update catalog state
+    // Update local cache
     const entry = {
       id: `file_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       name: fileName,
@@ -450,8 +519,19 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
     };
 
     catalog.files.unshift(entry);
-    catalog.folders[folderName].fileCount = (catalog.folders[folderName].fileCount || 0) + 1;
-    catalog.folders[folderName].totalBytes = (catalog.folders[folderName].totalBytes || 0) + sizeBytes;
+    if (!catalog.folders[folderName]) {
+      catalog.folders[folderName] = {
+        name: folderName,
+        tag: folderTag,
+        createdAt: new Date().toISOString(),
+        fileCount: 1,
+        totalBytes: sizeBytes,
+        dividerSent: true
+      };
+    } else {
+      catalog.folders[folderName].fileCount = (catalog.folders[folderName].fileCount || 0) + 1;
+      catalog.folders[folderName].totalBytes = (catalog.folders[folderName].totalBytes || 0) + sizeBytes;
+    }
     saveCatalog();
 
     // Confirm to user in private chat
