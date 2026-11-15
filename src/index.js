@@ -9,7 +9,7 @@ dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const DATA_DIR = path.join(__dirname, '..', 'data');
+const DATA_DIR = process.env.VERCEL ? path.join('/tmp', 'data') : path.join(__dirname, '..', 'data');
 
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -82,9 +82,9 @@ function saveConfig() {
   } catch (e) {}
 }
 
-// Express App for Cloud Healthcheck (Render, Railway, Koyeb)
+// Express App (Healthcheck & Webhook for Vercel/Render)
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.use(express.json());
 
 app.get('/', (req, res) => {
   res.send(`
@@ -110,8 +110,28 @@ app.get('/health', (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`[Web Server] Healthcheck running on port ${PORT}`);
+// Telegram Webhook Handler (untuk Vercel Serverless)
+app.post('/api/webhook', async (req, res) => {
+  try {
+    await bot.handleUpdate(req.body, res);
+    if (!res.headersSent) res.status(200).send('OK');
+  } catch (err) {
+    console.error('[Webhook Error]:', err.message);
+    if (!res.headersSent) res.status(500).send('Error');
+  }
+});
+
+// Auto-Register Webhook Helper
+app.get('/api/setup-webhook', async (req, res) => {
+  try {
+    const host = req.headers['x-forwarded-host'] || req.headers.host;
+    const proto = req.headers['x-forwarded-proto'] || 'https';
+    const webhookUrl = `${proto}://${host}/api/webhook`;
+    await bot.telegram.setWebhook(webhookUrl);
+    res.send(`✅ Webhook berhasil dipasang ke: <b>${webhookUrl}</b>! Bot Telegram sekarang terhubung ke Vercel!`);
+  } catch (err) {
+    res.status(500).send(`❌ Gagal set webhook: ${err.message}`);
+  }
 });
 
 // Telegraf Bot Initialization
@@ -452,23 +472,34 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
   }
 });
 
-// Launch Telegraf Bot
-bot.launch()
-  .then(() => {
-    console.log(`\n======================================================`);
-    console.log(`✅ Telegram Personal Vault Bot AKTIF!`);
-    console.log(`👉 Channel Target: ${channelId}`);
-    if (runtimeConfig.ownerChatId) {
-      console.log(`👤 Dikunci untuk Owner ID: ${runtimeConfig.ownerChatId}`);
-    } else {
-      console.log(`🔓 Mode Auto-Pairing: Menunggu chat pertama dari pemilik...`);
-    }
-    console.log(`======================================================\n`);
-  })
-  .catch((err) => {
-    console.error('❌ Gagal menjalankan bot Telegram:', err.message);
+// Launch Telegraf Bot (Local / Container Long-Polling)
+if (!process.env.VERCEL) {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`[Web Server] Running on port ${PORT}`);
   });
 
-// Enable graceful stop
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+  bot.launch()
+    .then(() => {
+      console.log(`\n======================================================`);
+      console.log(`✅ Telegram Personal Vault Bot AKTIF!`);
+      console.log(`👉 Channel Target: ${channelId}`);
+      if (runtimeConfig.ownerChatId) {
+        console.log(`👤 Dikunci untuk Owner ID: ${runtimeConfig.ownerChatId}`);
+      } else {
+        console.log(`🔓 Mode Auto-Pairing: Menunggu chat pertama dari pemilik...`);
+      }
+      console.log(`======================================================\n`);
+    })
+    .catch((err) => {
+      console.error('❌ Gagal menjalankan bot Telegram:', err.message);
+    });
+
+  // Enable graceful stop
+  process.once('SIGINT', () => bot.stop('SIGINT'));
+  process.once('SIGTERM', () => bot.stop('SIGTERM'));
+} else {
+  console.log(`⚡ Telegram Vault Bot running in Vercel Serverless Webhook mode!`);
+}
+
+export default app;
