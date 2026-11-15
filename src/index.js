@@ -421,14 +421,15 @@ ${previewList}${moreText}
     }
   }
 
-  // If there are documents/audio files, send them
-  const docItems = matchingFiles.filter(f => f.type === 'document' || f.type === 'audio' || f.type === 'voice');
+  // If there are uncompressed original documents / media files, send them directly as documents
+  const docItems = matchingFiles.filter(f => f.isOriginalDocument || f.type === 'document' || f.type === 'audio' || f.type === 'voice');
   if (docItems.length > 0 && docItems.length <= 5) {
     for (const doc of docItems) {
       try {
         if (doc.fileId) {
+          const badge = doc.isOriginalDocument ? '\n💎 <i>100% Original (Tanpa Kompresi)</i>' : '';
           await ctx.replyWithDocument(doc.fileId, {
-            caption: `📄 <b>${escapeHtml(doc.name)}</b> (${doc.sizeFormatted})\n📁 Folder: [ ${folderName} ]`,
+            caption: `📄 <b>${escapeHtml(doc.name)}</b> (${doc.sizeFormatted || formatBytes(doc.sizeBytes)})\n📁 Folder: [ ${folderName} ]${badge}`,
             parse_mode: 'HTML'
           });
         }
@@ -575,15 +576,17 @@ bot.command('start', async (ctx) => {
 • <b>Target Upload Aktif:</b> 📂 <code>${activeFolder}</code>
 • <b>Total Folder:</b> ${foldersList.length} folder
 • <b>Total File Terkatalog:</b> ${catalog.files.length} file
-• <b>Kapasitas:</b> ♾️ Unlimited Telegram Cloud
+• <b>Kapasitas:</b> ♾️ Unlimited Telegram Cloud (Mendukung Video 4K s/d 2 GB)
 
 <b>Cara Penggunaan:</b>
 1. Kirim <b>Foto, Video, Lagu, atau Dokumen</b> apa saja ke chat ini, file langsung otomatis masuk ke Channel Private kamu di folder <code>${activeFolder}</code>!
-2. Ketik nama folder (contoh: <code>Kansha</code>) atau gunakan tombol <b>📦 Ambil Bundle</b> untuk mengumpulkan semua file dalam 1 pesan album!
-3. Gunakan tombol di bawah atau ketik <code>/mkdir &lt;nama&gt;</code> untuk membuat folder baru.`;
+2. <b>Video 4K / Foto Asli:</b> Kirim lewat 📎 <b>File/Berkas</b> agar kualitas 100% utuh tanpa dikompres Telegram!
+3. Ketik nama folder (contoh: <code>Kansha</code>) atau gunakan tombol <b>📦 Ambil Bundle</b> untuk mengumpulkan semua file dalam 1 pesan album!
+4. Gunakan tombol di bawah atau ketik <code>/mkdir &lt;nama&gt;</code> untuk membuat folder baru.`;
 
   const keyboard = Markup.inlineKeyboard([
     [Markup.button.callback('📦 Kumpulkan & Ambil Bundle Folder', 'menu_pick_bundle')],
+    [Markup.button.callback('💎 Cara Kirim Video 4K Tanpa Kompresi', 'menu_guide_hq')],
     [Markup.button.callback('📁 Kelola Folder', 'menu_folders')],
     [Markup.button.callback('🎯 Ubah Folder Aktif', 'menu_switch_folder')],
     [Markup.button.callback('ℹ️ Bantuan & Perintah', 'menu_help')]
@@ -720,6 +723,87 @@ bot.action('menu_switch_folder', async (ctx) => {
   await showFoldersMenu(ctx);
 });
 
+bot.action('menu_guide_hq', async (ctx) => {
+  await ctx.answerCbQuery();
+  await sendHqGuide(ctx);
+});
+
+bot.action('menu_back_start', async (ctx) => {
+  await ctx.answerCbQuery();
+  const name = ctx.from.first_name || 'Teman';
+  const activeFolder = await getActiveFolder();
+  const foldersList = await getFoldersList();
+
+  const welcomeText = 
+`👋 <b>Halo, ${name}! Selamat datang di Brankas Pribadi Telegram kamu!</b>
+
+🗄️ <b>Status Brankas:</b>
+• <b>Target Upload Aktif:</b> 📂 <code>${activeFolder}</code>
+• <b>Total Folder:</b> ${foldersList.length} folder
+• <b>Total File Terkatalog:</b> ${catalog.files.length} file
+• <b>Kapasitas:</b> ♾️ Unlimited Telegram Cloud (Mendukung Video 4K s/d 2 GB)
+
+<b>Cara Penggunaan:</b>
+1. Kirim <b>Foto, Video, Lagu, atau Dokumen</b> apa saja ke chat ini, file langsung otomatis masuk ke Channel Private kamu di folder <code>${activeFolder}</code>!
+2. <b>Video 4K / Foto Asli:</b> Kirim lewat 📎 <b>File/Berkas</b> agar kualitas 100% utuh tanpa dikompres Telegram!
+3. Ketik nama folder (contoh: <code>Kansha</code>) atau gunakan tombol <b>📦 Ambil Bundle</b> untuk mengumpulkan semua file dalam 1 pesan album!
+4. Gunakan tombol di bawah atau ketik <code>/mkdir &lt;nama&gt;</code> untuk membuat folder baru.`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('📦 Kumpulkan & Ambil Bundle Folder', 'menu_pick_bundle')],
+    [Markup.button.callback('💎 Cara Kirim Video 4K Tanpa Kompresi', 'menu_guide_hq')],
+    [Markup.button.callback('📁 Kelola Folder', 'menu_folders')],
+    [Markup.button.callback('🎯 Ubah Folder Aktif', 'menu_switch_folder')],
+    [Markup.button.callback('ℹ️ Bantuan & Perintah', 'menu_help')]
+  ]);
+
+  try {
+    await ctx.editMessageText(welcomeText, { parse_mode: 'HTML', ...keyboard });
+  } catch (e) {
+    await ctx.reply(welcomeText, { parse_mode: 'HTML', ...keyboard });
+  }
+});
+
+bot.command(['hq', 'kualitas', 'hd', '4k'], async (ctx) => {
+  await sendHqGuide(ctx);
+});
+
+async function sendHqGuide(ctx) {
+  const guideText = 
+`💎 <b>PANDUAN MENYIMPAN VIDEO & FOTO KUALITAS ASLI 100% (TANPA DIKOMPRES)</b>
+
+Secara bawaan, aplikasi Telegram di HP (Android & iPhone) akan <b>mengompres dan memotong resolusi video/foto</b> jika dikirim dari tombol "Galeri" biasa (turun ke 480p atau 720p bitrate rendah).
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+✨ <b>CARA KIRIM KUALITAS ASLI (100% BIT-FOR-BIT):</b>
+1️⃣ Di chat bot ini, klik ikon 📎 <b>(Penjepit Kertas / Attachment)</b>
+2️⃣ Pilih menu <b>"Berkas"</b> atau <b>"File"</b> 📁 <i>(JANGAN pilih Galeri/Foto!)</i>
+3️⃣ Pilih <b>"Photo or Video"</b> (atau cari dari file memori HP)
+4️⃣ Pilih video/foto 4K kamu, lalu tekan <b>Kirim</b>!
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🚀 <b>Kelebihan Kirim Lewat File / Berkas:</b>
+• Video 1080p, 4K, 60fps, dan HDR tersimpan <b>100% utuh tanpa dikompres/di-encode ulang</b>
+• Ukuran file asli tidak dipotong sama sekali
+• Bitrate dan warna tidak buram
+• Mendukung hingga <b>2 GB (2.000 MB)</b> per video secara gratis!`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('📁 Kelola Folder', 'menu_folders')],
+    [Markup.button.callback('🔙 Kembali ke Menu Utama', 'menu_back_start')]
+  ]);
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(guideText, { parse_mode: 'HTML', ...keyboard });
+    } catch (e) {
+      await ctx.reply(guideText, { parse_mode: 'HTML', ...keyboard });
+    }
+  } else {
+    await ctx.reply(guideText, { parse_mode: 'HTML', ...keyboard });
+  }
+}
+
 bot.action('prompt_mkdir', async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.reply('💡 Untuk membuat folder baru, ketik:\n<code>/mkdir &lt;Nama Folder&gt;</code>\n\nContoh:\n<code>/mkdir Dokumen Kantor</code>\n<code>/mkdir Liburan Jogja</code>', { parse_mode: 'HTML' });
@@ -801,6 +885,8 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
   let fileName = 'File';
   let fileType = 'document';
   let sizeBytes = 0;
+  let isCompressed = false;
+  let isOriginalDocument = false;
 
   if (ctx.message.photo) {
     const photos = ctx.message.photo;
@@ -809,18 +895,37 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
     fileName = `Foto_${Date.now()}.jpg`;
     fileType = 'photo';
     sizeBytes = largest.file_size || 0;
+    isCompressed = true;
   } else if (ctx.message.video) {
     const v = ctx.message.video;
     fileId = v.file_id;
     fileName = v.file_name || `Video_${Date.now()}.mp4`;
     fileType = 'video';
     sizeBytes = v.file_size || 0;
+    isCompressed = true;
   } else if (ctx.message.document) {
     const d = ctx.message.document;
     fileId = d.file_id;
     fileName = d.file_name || `Doc_${Date.now()}`;
-    fileType = 'document';
     sizeBytes = d.file_size || 0;
+
+    const ext = path.extname(fileName).toLowerCase();
+    const isVideoDoc = (d.mime_type && d.mime_type.startsWith('video/')) || 
+      ['.mp4', '.mov', '.mkv', '.avi', '.m4v', '.webm', '.flv', '.wmv', '.3gp'].includes(ext);
+    const isImageDoc = (d.mime_type && d.mime_type.startsWith('image/')) || 
+      ['.jpg', '.jpeg', '.png', '.heic', '.raw', '.dng', '.webp', '.tiff'].includes(ext);
+
+    if (isVideoDoc) {
+      fileType = 'video';
+      isOriginalDocument = true;
+    } else if (isImageDoc) {
+      fileType = 'photo';
+      isOriginalDocument = true;
+    } else if (d.mime_type && d.mime_type.startsWith('audio/')) {
+      fileType = 'audio';
+    } else {
+      fileType = 'document';
+    }
   } else if (ctx.message.audio) {
     const a = ctx.message.audio;
     fileId = a.file_id;
@@ -834,9 +939,16 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
     sizeBytes = ctx.message.voice.file_size || 0;
   }
 
+  let qualityBadge = '';
+  if (isOriginalDocument) {
+    qualityBadge = `\n💎 <b>Kualitas:</b> <code>100% Original (Tanpa Kompresi)</code>`;
+  } else if (isCompressed) {
+    qualityBadge = `\n⚡ <b>Format:</b> <code>Galeri (Kompresi Telegram)</code>`;
+  }
+
   const caption = 
 `📁 <b>FOLDER: [ ${folderName} ]</b>
-🏷️ <b>Tag Folder:</b> ${folderTag}
+🏷️ <b>Tag Folder:</b> ${folderTag}${qualityBadge}
 
 📄 <b>Nama File:</b> <code>${fileName}</code>
 📦 <b>Ukuran:</b> ${formatBytes(sizeBytes)}
@@ -856,6 +968,7 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
       name: fileName,
       type: fileType,
       fileId: fileId,
+      isOriginalDocument: isOriginalDocument,
       sizeBytes: sizeBytes,
       sizeFormatted: formatBytes(sizeBytes),
       date: new Date().toISOString(),
@@ -883,17 +996,29 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
     // Sync state to Telegram cloud in background
     syncCatalogToTelegram().catch(() => {});
 
+    let qualityNote = '';
+    if (isCompressed) {
+      qualityNote = 
+`\n\n💡 <i>Catatan Kualitas Video/Foto:</i>\n` +
+`File ini terkompresi otomatis oleh aplikasi Telegram saat dikirim via Galeri.\n` +
+`👉 <b>Ingin Kualitas 4K / HD 100% Asli?</b> Kirim lewat menu: 📎 <b>Penjepit Kertas ➔ File / Berkas ➔ Foto atau Video</b>!`;
+    } else if (isOriginalDocument) {
+      qualityNote = `\n\n💎 <b>Hebat!</b> File tersimpan dalam <b>Kualitas Asli 100% (Uncompressed)</b> tanpa penurunan resolusi sedikitpun.`;
+    }
+
     // Confirm to user in private chat with instant bundle shortcut
     const keyboard = Markup.inlineKeyboard([
-      [Markup.button.callback(`📦 Lihat Bundle [ ${folderName} ]`, `bundle_view_${encodeURIComponent(folderName)}`)]
+      [Markup.button.callback(`📦 Lihat Bundle [ ${folderName} ]`, `bundle_view_${encodeURIComponent(folderName)}`)],
+      [Markup.button.callback('💎 Cara Kirim Video 4K Asli', 'menu_guide_hq')]
     ]);
 
     await ctx.reply(
       `✅ <b>Berhasil Disimpan!</b>\n\n` +
       `📁 <b>Folder:</b> <code>${folderName}</code>\n` +
       `📦 <b>Ukuran:</b> ${formatBytes(sizeBytes)}\n` +
-      `🔗 <b>Tag di Channel:</b> ${folderTag}\n\n` +
-      `<i>File kamu sudah aman di Telegram Private Vault.</i>`,
+      `🔗 <b>Tag di Channel:</b> ${folderTag}` +
+      qualityNote +
+      `\n\n<i>File kamu sudah aman di Telegram Private Vault.</i>`,
       {
         parse_mode: 'HTML',
         reply_to_message_id: ctx.message.message_id,
