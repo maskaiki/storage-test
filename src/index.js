@@ -31,9 +31,18 @@ function toFolderTag(name) {
   return '#Folder_' + name.trim().replace(/\s+/g, '_').replace(/[^a-zA-Z0-9_]/g, '');
 }
 
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 // Load or initialize catalog database (Local caching)
 let catalog = {
-  activeFolder: 'Umum',
+  activeFolder: 'Kansha',
   folders: {
     'Umum': {
       name: 'Umum',
@@ -42,9 +51,30 @@ let catalog = {
       fileCount: 0,
       totalBytes: 0,
       dividerSent: false
+    },
+    'Kansha': {
+      name: 'Kansha',
+      tag: '#Folder_Kansha',
+      createdAt: new Date().toISOString(),
+      fileCount: 1,
+      totalBytes: 1352663,
+      dividerSent: true
     }
   },
-  files: []
+  files: [
+    {
+      id: "file_1794726953000_6528",
+      name: "IMG_6528.mov",
+      type: "video",
+      fileId: "BAACAgUAAxkBAAMZavlcJwiICSbxjcYk7tbDp7J56VoAApEmAAI18shXSITZ8QxNep09BA",
+      sizeBytes: 1352663,
+      sizeFormatted: "1.29 MB",
+      date: "2026-11-15T07:15:53.000Z",
+      channelMessageId: 13,
+      folder: "Kansha",
+      folderTag: "#Folder_Kansha"
+    }
+  ]
 };
 
 if (fs.existsSync(CATALOG_PATH)) {
@@ -94,10 +124,70 @@ if (!token || !token.includes(':')) {
 
 const bot = new Telegraf(token);
 
+let botUsername = 'storageabim_bot';
+bot.telegram.getMe().then(me => {
+  if (me && me.username) botUsername = me.username;
+}).catch(() => {});
+
 // ============================================================================
-// SERVERLESS PERSISTENCE VIA TELEGRAM CLOUD (Channel Pinned Message & Description)
-// Vercel serverless has ephemeral /tmp and memory, so Telegram channel is our DB!
+// SERVERLESS PERSISTENCE VIA TELEGRAM CLOUD (Channel Pinned Divider & Database Sync)
+// Vercel serverless has ephemeral /tmp, so Telegram channel stores all data!
 // ============================================================================
+
+let isSyncing = false;
+async function syncCatalogToTelegram() {
+  if (!channelId || isSyncing) return;
+  isSyncing = true;
+  try {
+    const dataBuf = Buffer.from(JSON.stringify({
+      files: catalog.files,
+      folders: catalog.folders,
+      activeFolder: catalog.activeFolder,
+      updatedAt: new Date().toISOString()
+    }));
+
+    const sent = await bot.telegram.sendDocument(
+      channelId,
+      { source: dataBuf, filename: `vault_catalog_${Date.now()}.json` },
+      { caption: `💾 #SYSTEM_VAULT_DB_SYNC`, disable_notification: true }
+    );
+    const fileId = sent.document.file_id;
+
+    const folders = await getFoldersList();
+    const desc = `Vault Storage | Folders: ${folders.join(', ')} | DB:${fileId}`.substring(0, 255);
+    await bot.telegram.setChatDescription(channelId, desc);
+    saveCatalog();
+  } catch (err) {
+    console.warn('[Sync DB Warning]:', err.message);
+  } finally {
+    isSyncing = false;
+  }
+}
+
+async function loadCatalogFromTelegram() {
+  if (!channelId) return;
+  try {
+    const chat = await bot.telegram.getChat(channelId);
+    if (chat.description) {
+      const match = chat.description.match(/DB:([a-zA-Z0-9_-]+)/);
+      if (match && match[1]) {
+        const fileId = match[1];
+        const link = await bot.telegram.getFileLink(fileId);
+        const res = await fetch(link.href);
+        const data = await res.json();
+        if (data && Array.isArray(data.files) && data.files.length > 0) {
+          catalog.files = data.files;
+          if (data.folders) catalog.folders = { ...catalog.folders, ...data.folders };
+          if (data.activeFolder) catalog.activeFolder = data.activeFolder;
+          saveCatalog();
+          console.log(`[DB Cloud] Loaded ${catalog.files.length} files from Telegram Cloud!`);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Load DB Warning]:', err.message);
+  }
+}
 
 // 1. Get active folder directly from Telegram channel pinned message
 async function getActiveFolder() {
@@ -129,7 +219,7 @@ async function getFoldersList() {
     try {
       const chat = await bot.telegram.getChat(channelId);
       if (chat.description) {
-        const match = chat.description.match(/Folders:\s*([^\n\r]+)/i);
+        const match = chat.description.match(/Folders:\s*([^|]+)/i);
         if (match && match[1]) {
           match[1].split(',').map(s => s.trim()).filter(Boolean).forEach(f => folders.add(f));
         }
@@ -160,7 +250,7 @@ async function saveFolderToChannel(newFolder) {
   }
 }
 
-// 4. Send and pin folder divider in channel
+// 4. Send and pin folder divider in channel WITH Interactive Action Button
 async function sendAndPinDivider(folderName, isNew = false) {
   if (!channelId) return;
   try {
@@ -180,7 +270,21 @@ async function sendAndPinDivider(folderName, isNew = false) {
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 <i>Target upload aktif dialihkan ke folder ini.</i>`;
 
-    const sent = await bot.telegram.sendMessage(channelId, text, { parse_mode: 'HTML' });
+    const buttonUrl = `https://t.me/${botUsername}?start=bundle_${encodeURIComponent(folderName)}`;
+    const sent = await bot.telegram.sendMessage(channelId, text, {
+      parse_mode: 'HTML',
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: `📦 Buka Bundle & Ambil Semua Isi Folder [ ${folderName} ]`,
+              url: buttonUrl
+            }
+          ]
+        ]
+      }
+    });
+
     try {
       await bot.telegram.pinChatMessage(channelId, sent.message_id, { disable_notification: true });
     } catch (e) {
@@ -206,6 +310,154 @@ async function sendAndPinDivider(folderName, isNew = false) {
   }
 }
 
+// ============================================================================
+// BUNDLE HANDLER (Kumpulkan semua file folder dalam 1 pesan album yang menarik)
+// ============================================================================
+async function sendFolderBundle(ctx, folderName) {
+  if (catalog.files.length === 0) {
+    await loadCatalogFromTelegram();
+  }
+
+  const matchingFiles = catalog.files.filter(
+    f => f.folder && f.folder.toLowerCase() === folderName.toLowerCase()
+  );
+
+  const folderTag = toFolderTag(folderName);
+
+  if (matchingFiles.length === 0) {
+    const emptyCard = 
+`╔══════════════════════════════════════╗
+   📁  <b>K O L E K S I   F O L D E R</b>
+   📂  <b>[ ${escapeHtml(folderName.toUpperCase())} ]</b>
+╚══════════════════════════════════════╝
+
+🏷️ <b>Tag Channel:</b> <code>${folderTag}</code>
+📊 <b>Status:</b> 📭 <i>Folder ini saat ini masih kosong.</i>
+
+💡 <i>Kirim foto, video, atau dokumen ke chat ini sekarang untuk langsung menyimpannya ke folder "${folderName}"!</i>`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(`🎯 Jadikan "${folderName}" Target Upload`, `set_active_${encodeURIComponent(folderName)}`)],
+      [Markup.button.callback('📁 Kelola Folder Lainnya', 'menu_folders')]
+    ]);
+
+    return ctx.reply(emptyCard, { parse_mode: 'HTML', ...keyboard });
+  }
+
+  // Calculate statistics
+  const totalFiles = matchingFiles.length;
+  const totalBytes = matchingFiles.reduce((acc, f) => acc + (f.sizeBytes || 0), 0);
+  const photoCount = matchingFiles.filter(f => f.type === 'photo').length;
+  const videoCount = matchingFiles.filter(f => f.type === 'video').length;
+  const docCount = matchingFiles.filter(f => f.type === 'document').length;
+  const audioCount = matchingFiles.filter(f => f.type === 'audio' || f.type === 'voice').length;
+
+  let breakdownParts = [];
+  if (photoCount) breakdownParts.push(`🖼️ ${photoCount} Foto`);
+  if (videoCount) breakdownParts.push(`🎬 ${videoCount} Video`);
+  if (docCount) breakdownParts.push(`📄 ${docCount} Dokumen`);
+  if (audioCount) breakdownParts.push(`🎵 ${audioCount} Audio`);
+
+  // Build file list (top 10 preview)
+  const previewList = matchingFiles.slice(0, 10).map((f, i) => {
+    const icon = f.type === 'photo' ? '🖼️' : f.type === 'video' ? '🎬' : f.type === 'audio' ? '🎵' : '📄';
+    return `${i + 1}. ${icon} <code>${escapeHtml(f.name)}</code> (${f.sizeFormatted || formatBytes(f.sizeBytes)})`;
+  }).join('\n');
+
+  const moreText = totalFiles > 10 ? `\n<i>...dan ${totalFiles - 10} file lainnya tersimpan.</i>` : '';
+
+  const bundleCard = 
+`╔══════════════════════════════════════╗
+   📁  <b>K O L E K S I   F O L D E R</b>
+   📂  <b>[ ${escapeHtml(folderName.toUpperCase())} ]</b>
+╚══════════════════════════════════════╝
+
+🏷️ <b>Tag Channel:</b> <code>${folderTag}</code>
+📊 <b>Ringkasan Bundle:</b>
+• 🗂️ <b>Total Berkas:</b> <b>${totalFiles} file</b> (${formatBytes(totalBytes)})
+• 📦 <b>Rincian:</b> ${breakdownParts.join(' • ') || 'Campuran'}
+• 🕒 <b>Update Terakhir:</b> ${new Date(matchingFiles[0].date).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' })}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📑 <b>DAFTAR BERKAS TERKUMPUL:</b>
+${previewList}${moreText}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✨ <i>Semua media di atas telah dikemas dan dikirimkan dalam 1 pesan di bawah ini! 👇</i>`;
+
+  const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('📥 Kirim Ulang Album Media', `bundle_send_album_${encodeURIComponent(folderName)}`)],
+    [Markup.button.callback(`🎯 Jadikan "${folderName}" Target Upload`, `set_active_${encodeURIComponent(folderName)}`)],
+    [Markup.button.callback('📁 Kelola Folder Lainnya', 'menu_folders')]
+  ]);
+
+  // Send the aesthetic bundle summary card
+  await ctx.reply(bundleCard, { parse_mode: 'HTML', ...keyboard });
+
+  // Send all media files gathered in ONE single message (MediaGroup Album mosaic)
+  const mediaItems = matchingFiles.filter(f => f.type === 'photo' || f.type === 'video');
+  if (mediaItems.length > 0) {
+    try {
+      const batch = mediaItems.slice(0, 10);
+      const album = batch.map((item, idx) => ({
+        type: item.type === 'video' ? 'video' : 'photo',
+        media: item.fileId,
+        caption: idx === 0 
+          ? `📁 <b>Bundle Folder: [ ${escapeHtml(folderName)} ]</b> (${mediaItems.length} media)\n🏷️ <code>${folderTag}</code>`
+          : undefined,
+        parse_mode: 'HTML'
+      }));
+
+      await ctx.replyWithMediaGroup(album);
+    } catch (err) {
+      console.warn('[MediaGroup Warning]:', err.message);
+      // Fallback: Copy first media from channel
+      try {
+        const first = mediaItems[0];
+        if (first.channelMessageId && channelId) {
+          await ctx.telegram.copyMessage(ctx.chat.id, channelId, first.channelMessageId);
+        }
+      } catch (e) {}
+    }
+  }
+
+  // If there are documents/audio files, send them
+  const docItems = matchingFiles.filter(f => f.type === 'document' || f.type === 'audio' || f.type === 'voice');
+  if (docItems.length > 0 && docItems.length <= 5) {
+    for (const doc of docItems) {
+      try {
+        if (doc.fileId) {
+          await ctx.replyWithDocument(doc.fileId, {
+            caption: `📄 <b>${escapeHtml(doc.name)}</b> (${doc.sizeFormatted})\n📁 Folder: [ ${folderName} ]`,
+            parse_mode: 'HTML'
+          });
+        }
+      } catch (e) {}
+    }
+  }
+}
+
+async function showBundlePickerMenu(ctx) {
+  const folders = await getFoldersList();
+  let text = `📦 <b>PILIH BUNDLE FOLDER</b>\n\n`;
+  text += `Pilih folder di bawah untuk mengumpulkan semua foto & video di dalamnya dan dikirimkan <b>dalam 1 pesan album cantik</b>:\n`;
+
+  const buttons = folders.map(f => [
+    Markup.button.callback(`📦 Koleksi [ ${f} ]`, `bundle_view_${encodeURIComponent(f)}`)
+  ]);
+
+  const keyboard = Markup.inlineKeyboard(buttons);
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+    } catch (e) {
+      await ctx.reply(text, { parse_mode: 'HTML', ...keyboard });
+    }
+  } else {
+    await ctx.reply(text, { parse_mode: 'HTML', ...keyboard });
+  }
+}
+
 // Express App (Healthcheck & Webhook for Vercel/Render)
 const app = express();
 app.use(express.json());
@@ -221,6 +473,7 @@ app.get('/', async (req, res) => {
         <p style="color:#10b981;">✅ Bot is running and healthy on Vercel!</p>
         <p>Active Target Folder: <b>${active}</b></p>
         <p>Known Folders: <b>${folders.join(', ')}</b></p>
+        <p>Total Files in DB: <b>${catalog.files.length}</b></p>
       </body>
     </html>
   `);
@@ -234,6 +487,7 @@ app.get('/health', async (req, res) => {
     uptime: process.uptime(),
     activeFolder: active,
     folders: folders,
+    totalFiles: catalog.files.length,
     timestamp: new Date().toISOString()
   });
 });
@@ -241,6 +495,9 @@ app.get('/health', async (req, res) => {
 // Telegram Webhook Handler (untuk Vercel Serverless)
 app.post('/api/webhook', async (req, res) => {
   try {
+    if (catalog.files.length === 0) {
+      await loadCatalogFromTelegram();
+    }
     await bot.handleUpdate(req.body, res);
     if (!res.headersSent) res.status(200).send('OK');
   } catch (err) {
@@ -297,8 +554,16 @@ bot.use(async (ctx, next) => {
   return;
 });
 
-// 1. /start Command
+// 1. /start Command (Supports Deep-Link: /start bundle_<folderName>)
 bot.command('start', async (ctx) => {
+  const parts = ctx.message.text.split(' ');
+  const payload = parts[1];
+
+  if (payload && payload.startsWith('bundle_')) {
+    const folderName = decodeURIComponent(payload.replace('bundle_', ''));
+    return sendFolderBundle(ctx, folderName);
+  }
+
   const name = ctx.from.first_name || 'Teman';
   const activeFolder = await getActiveFolder();
   const foldersList = await getFoldersList();
@@ -309,13 +574,16 @@ bot.command('start', async (ctx) => {
 🗄️ <b>Status Brankas:</b>
 • <b>Target Upload Aktif:</b> 📂 <code>${activeFolder}</code>
 • <b>Total Folder:</b> ${foldersList.length} folder
+• <b>Total File Terkatalog:</b> ${catalog.files.length} file
 • <b>Kapasitas:</b> ♾️ Unlimited Telegram Cloud
 
 <b>Cara Penggunaan:</b>
 1. Kirim <b>Foto, Video, Lagu, atau Dokumen</b> apa saja ke chat ini, file langsung otomatis masuk ke Channel Private kamu di folder <code>${activeFolder}</code>!
-2. Gunakan tombol di bawah atau ketik <code>/mkdir &lt;nama&gt;</code> untuk membuat folder baru.`;
+2. Ketik nama folder (contoh: <code>Kansha</code>) atau gunakan tombol <b>📦 Ambil Bundle</b> untuk mengumpulkan semua file dalam 1 pesan album!
+3. Gunakan tombol di bawah atau ketik <code>/mkdir &lt;nama&gt;</code> untuk membuat folder baru.`;
 
   const keyboard = Markup.inlineKeyboard([
+    [Markup.button.callback('📦 Kumpulkan & Ambil Bundle Folder', 'menu_pick_bundle')],
     [Markup.button.callback('📁 Kelola Folder', 'menu_folders')],
     [Markup.button.callback('🎯 Ubah Folder Aktif', 'menu_switch_folder')],
     [Markup.button.callback('ℹ️ Bantuan & Perintah', 'menu_help')]
@@ -340,11 +608,14 @@ async function showFoldersMenu(ctx) {
     text += `   • Tag: <code>${toFolderTag(folderName)}</code>\n\n`;
   });
 
-  text += `<i>Klik tombol di bawah untuk memilih folder tujuan upload baru:</i>`;
+  text += `<i>Klik tombol di bawah untuk memilih target upload atau mengambil bundle file:</i>`;
 
   const buttons = foldersList.map(folderName => {
     const isActive = folderName.toLowerCase() === currentActive.toLowerCase();
-    return [Markup.button.callback(`${isActive ? '🎯 ' : '📁 '}${folderName}`, `set_active_${encodeURIComponent(folderName)}`)];
+    return [
+      Markup.button.callback(`${isActive ? '🟢 Target: ' : '🎯 Pilih: '}${folderName}`, `set_active_${encodeURIComponent(folderName)}`),
+      Markup.button.callback(`📦 Ambil File`, `bundle_view_${encodeURIComponent(folderName)}`)
+    ];
   });
 
   buttons.push([Markup.button.callback('➕ Buat Folder Baru', 'prompt_mkdir')]);
@@ -373,6 +644,7 @@ bot.command('mkdir', async (ctx) => {
 
   await saveFolderToChannel(folderName);
   await sendAndPinDivider(folderName, true);
+  syncCatalogToTelegram().catch(() => {});
 
   await ctx.reply(
     `✅ <b>Folder Baru Berhasil Dibuat!</b>\n\n` +
@@ -403,10 +675,44 @@ bot.command('use', async (ctx) => {
   await ctx.reply(`🎯 <b>Target Upload Diubah!</b>\nSemua file berikutnya akan masuk ke: <b>${targetFolder}</b>`, { parse_mode: 'HTML' });
 });
 
+// 5. /bundle or /cari or /get Command
+bot.command(['bundle', 'folder', 'get', 'cari', 'search'], async (ctx) => {
+  const parts = ctx.message.text.split(' ').slice(1);
+  const query = parts.join(' ').trim();
+
+  if (!query) {
+    return showBundlePickerMenu(ctx);
+  }
+
+  const folders = await getFoldersList();
+  const matched = folders.find(f => f.toLowerCase() === query.toLowerCase());
+  if (matched) {
+    return sendFolderBundle(ctx, matched);
+  }
+
+  const partials = folders.filter(f => f.toLowerCase().includes(query.toLowerCase()));
+  if (partials.length === 1) {
+    return sendFolderBundle(ctx, partials[0]);
+  } else if (partials.length > 1) {
+    const buttons = partials.map(p => [Markup.button.callback(`📦 Ambil Bundle: ${p}`, `bundle_view_${encodeURIComponent(p)}`)]);
+    return ctx.reply(
+      `🔍 Ditemukan <b>${partials.length} folder</b> cocok dengan "<b>${escapeHtml(query)}</b>":`,
+      { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) }
+    );
+  }
+
+  return ctx.reply(`❌ Folder "<b>${escapeHtml(query)}</b>" tidak ditemukan.\nKetik <code>/folders</code> untuk melihat semua folder.`, { parse_mode: 'HTML' });
+});
+
 // Actions / Callbacks
 bot.action('menu_folders', async (ctx) => {
   await ctx.answerCbQuery();
   await showFoldersMenu(ctx);
+});
+
+bot.action('menu_pick_bundle', async (ctx) => {
+  await ctx.answerCbQuery();
+  await showBundlePickerMenu(ctx);
 });
 
 bot.action('menu_switch_folder', async (ctx) => {
@@ -424,7 +730,9 @@ bot.action('menu_help', async (ctx) => {
   await ctx.reply(
     `📖 <b>PANDUAN PERINTAH BOT</b>\n\n` +
     `• <b>Kirim Foto/Video Langsung:</b> File otomatis masuk ke folder aktif saat ini.\n` +
-    `• <code>/folders</code> : Lihat semua folder dan pilih target upload.\n` +
+    `• <b>Ketik Nama Folder (cth: <code>Kansha</code>):</b> Bot langsung mengumpulkan semua file folder tersebut dalam 1 pesan album!\n` +
+    `• <code>/bundle &lt;nama&gt;</code> : Ambil bundle semua file dalam folder.\n` +
+    `• <code>/folders</code> : Lihat semua folder dan statistik file.\n` +
     `• <code>/mkdir &lt;nama&gt;</code> : Buat folder baru & langsung aktif.\n` +
     `• <code>/use &lt;nama&gt;</code> : Ganti tujuan folder aktif.\n` +
     `• <code>/start</code> : Menu utama bot.`,
@@ -437,6 +745,43 @@ bot.action(/^set_active_(.+)$/, async (ctx) => {
   await sendAndPinDivider(folderName, false);
   await ctx.answerCbQuery(`Folder aktif: ${folderName}`);
   await showFoldersMenu(ctx);
+});
+
+bot.action(/^bundle_view_(.+)$/, async (ctx) => {
+  const folderName = decodeURIComponent(ctx.match[1]);
+  await ctx.answerCbQuery(`Memuat bundle ${folderName}...`);
+  await sendFolderBundle(ctx, folderName);
+});
+
+bot.action(/^bundle_send_album_(.+)$/, async (ctx) => {
+  const folderName = decodeURIComponent(ctx.match[1]);
+  await ctx.answerCbQuery(`Mengirim album ${folderName}...`);
+  await sendFolderBundle(ctx, folderName);
+});
+
+// Text message handler (Natural Search / Typing Folder Name Directly)
+bot.on('text', async (ctx, next) => {
+  const text = ctx.message.text.trim();
+  if (text.startsWith('/')) return next();
+
+  const folders = await getFoldersList();
+  const matched = folders.find(f => f.toLowerCase() === text.toLowerCase());
+  if (matched) {
+    return sendFolderBundle(ctx, matched);
+  }
+
+  const partials = folders.filter(f => f.toLowerCase().includes(text.toLowerCase()));
+  if (partials.length === 1) {
+    return sendFolderBundle(ctx, partials[0]);
+  } else if (partials.length > 1) {
+    const buttons = partials.map(p => [Markup.button.callback(`📦 Ambil Bundle: ${p}`, `bundle_view_${encodeURIComponent(p)}`)]);
+    return ctx.reply(
+      `🔍 Ditemukan <b>${partials.length} folder</b> dengan kata kunci "<b>${escapeHtml(text)}</b>":\nSilakan pilih folder:`,
+      { parse_mode: 'HTML', ...Markup.inlineKeyboard(buttons) }
+    );
+  }
+
+  return next();
 });
 
 // ==========================================
@@ -505,11 +850,12 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
       parse_mode: 'HTML'
     });
 
-    // Update local cache
+    // Update catalog with fileId for instant media group bundling
     const entry = {
       id: `file_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
       name: fileName,
       type: fileType,
+      fileId: fileId,
       sizeBytes: sizeBytes,
       sizeFormatted: formatBytes(sizeBytes),
       date: new Date().toISOString(),
@@ -534,7 +880,14 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
     }
     saveCatalog();
 
-    // Confirm to user in private chat
+    // Sync state to Telegram cloud in background
+    syncCatalogToTelegram().catch(() => {});
+
+    // Confirm to user in private chat with instant bundle shortcut
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback(`📦 Lihat Bundle [ ${folderName} ]`, `bundle_view_${encodeURIComponent(folderName)}`)]
+    ]);
+
     await ctx.reply(
       `✅ <b>Berhasil Disimpan!</b>\n\n` +
       `📁 <b>Folder:</b> <code>${folderName}</code>\n` +
@@ -543,7 +896,8 @@ bot.on(['photo', 'video', 'document', 'audio', 'voice'], async (ctx) => {
       `<i>File kamu sudah aman di Telegram Private Vault.</i>`,
       {
         parse_mode: 'HTML',
-        reply_to_message_id: ctx.message.message_id
+        reply_to_message_id: ctx.message.message_id,
+        ...keyboard
       }
     );
   } catch (err) {
