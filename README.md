@@ -1,4 +1,4 @@
-# 🗄️ Telegram Vault Personal Bot (Versi Ringan & Cepat)
+# 🗄️ Telegram Vault Personal Bot 
 
 Bot penyimpanan awan pribadi tanpa batas berbasis **Node.js & Telegraf**. Versi ini dirancang khusus untuk penggunaan personal/teman tanpa fitur berat Google Drive, sehingga **sangat ringan (<25 MB RAM)** dan **siap online 24 jam nonstop di Cloud Gratis (Render / Railway / Koyeb) atau di laptop lokal**.
 
